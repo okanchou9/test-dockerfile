@@ -32,6 +32,11 @@
 # variables:
 #     SECURE_LOG_LEVEL: 'debug'
 
+stages:
+  - build
+  - test
+  - upload
+
 build:
   image: docker:latest
   stage: build
@@ -40,10 +45,48 @@ build:
   variables:
     IMAGE: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
   script:
+    - echo $CI_REGISTRY
     - docker info
-    - echo "${docker_hub_password}" | docker login -u "${docker_hub_account}" --password-stdin $CI_REGISTRY
+    #- echo "${docker_hub_password}" | docker login -u "${docker_hub_account}" --password-stdin $CI_REGISTRY
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
     - docker build -t $IMAGE .
     - docker push $IMAGE
 
 include:
   - template: Security/Container-Scanning.gitlab-ci.yml
+
+check_result:
+  image: docker:latest
+  stage: upload
+  services:
+    - docker:dind
+  variables:
+    IMAGE: $CI_REGISTRY_IMAGE/$CI_COMMIT_REF_SLUG:$CI_COMMIT_SHA
+  dependencies:
+    - container_scanning
+  script:
+    - cat /etc/os-release
+    - apk update
+    - apk add jq
+    - cat gl-container-scanning-report.json | jq '.vulnerabilities[].severity' > issue_list.txt
+    - >
+      if grep -q "Critical" issue_list.txt || grep -q "High" issue_list.txt; then
+        echo "FAILED!! Check Scanned report to correct issue."
+      else
+        echo "PASSED!!"
+        apk add git
+        docker images
+        docker build -t $IMAGE .
+        docker images
+        export datetime=$(date +%s)
+        mkdir temp && cd temp
+        docker save -o container_$datetime.tar $IMAGE
+        ls -al
+        git config --global http.postBuffer 260000000
+        git init
+        git config --global user.email "$email"
+        git config --global user.name "$$username"
+        git add --all
+        git commit -m "GitLab Runner Push Scanned Docker Image to Clean Zone."
+        git push -f https://$username:$password@gitlab.com/$username/clean_zone.git HEAD:master
+      fi
